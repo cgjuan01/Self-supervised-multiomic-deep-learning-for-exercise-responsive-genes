@@ -17,6 +17,7 @@ Glycan-pathway prior (FUT8, ST6GAL1, B4GALT1, etc.)
 and learns a graph-structured representation of exercise biology using self-supervised contrastive GNN pretraining, with optional supervised evaluation.
 
 🔍 What This Model Does
+
 ✔ 1. Self-Supervised Contrastive GNN (SimCLR-style)
 
 No labels required
