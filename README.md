@@ -1,52 +1,99 @@
-This repository contains the full implementation of exercise-only, multi-omic Trait Efficiency Loci Graph Neural Network (TEL GNN) designed to identify exercise-responsive, multi-layer regulatory genes.
+# Deep Learning GNN (MTI–GAT): Structure & Function-Aware Multi-Omic Graph Attention Network for Gene Prioritisation
+
+
+This repository implements a **deep learning framework** built on a supervised **Graph Attention Network (GAT)** to prioritise exercise-responsive and ageing-related genes.  
 
 The model integrates:
 
-Proteomic MR (UKBB → PPP plasma proteins)
+- **Mendelian randomisation (MR) causal signals** across four omics,
+- the **multi-omic MTI (Modfied Trait Importance) score**,
+- **AlphaFold2 structural descriptors**,
+- **PANTHER functional annotations** (4 layers),
+- **graph topology metrics** extracted from a kNN gene–gene network.
 
-Epigenomic mQTL / DNAm features
+The GAT learns structure and function-aware MTI embeddings and refines gene ranking beyond raw MR/MTI values.
 
-Glycomic / gQTL features
+---
 
-Transcriptomic bulk + single-cell eQTL features
+## Core scoring basis
 
-Exercise-TEL (TEL_ex) cross-omic summary features
+Gene prioritisation is driven by:
 
-Glycan-pathway prior (FUT8, ST6GAL1, B4GALT1, etc.)
+### **1. MR-derived causal evidence**
+MR betas, SE, p-values, FDR, causal scores, nsnp, and layer-specific MR statistics form the core feature set.
 
-and learns a graph-structured representation of exercise biology using self-supervised contrastive GNN pretraining, with optional supervised evaluation.
+### **2. The multi-omic MTI score**
+Serves as the **supervised regression target**, representing integrated causal support across proteomic, CpG, glycan and single-cell transcriptomic data.
 
-🔍 What This Model Does
+Thus, **MR + MTI are the fundamental quantitative basis for all model predictions**, while structural, functional, and topological features modulate the deep-learning representation.
 
-✔ 1. Self-Supervised Contrastive GNN (SimCLR-style)
+---
 
-No labels required
+## Feature groups
 
-Two augmented feature-dropout “views”
+### **AlphaFold2 structure features**
+- pLDDT distributions  
+- secondary structure fractions  
+- disorder/exposure metrics  
+- domain and interface descriptors  
 
-Trains a GCN encoder to maximise agreement between augmented node embeddings
+### **PANTHER functional structure (4 layers)**
+- protein class  
+- molecular function  
+- biological process  
+- pathway / component annotations  
 
-Produces:
+### **Graph topology**
+Derived from the kNN gene-similarity graph (k=15):
+- degree  
+- PageRank  
+- eigenvector centrality  
+- betweenness  
+- closeness  
+- clustering coefficient  
 
-GNN_exercise_score_ssl
+---
 
-GNN_exercise_rank_ssl
+## Model architecture
 
-✔ 2. Optional Supervised GNN
+- **Two-layer GAT encoder** (`GATConv`, ELU, dropout)
+- **Regression head:** MTI prediction  
+- **Classification head:** multi-layer support (`MTI_n_layers ≥ 2`)
+- **Loss:**  
+  `L = MSE(MTI_score) + λ × BCE(multi-layer label)`
 
-Activated only if you pass:
+---
 
---label_col <binary_column>
+## Inputs
 
+### Node table (`--node_path`)
+Must contain:
+- `gene_symbol`
+- `MTI_score`
 
-The script will:
+Used as features:
+- all MR numeric features  
+- single-cell MR features  
+- AlphaFold2 structure metrics  
+- PANTHER annotations  
+- topology and structural-summary features  
 
-Train a GCN classifier
+### Edge table (`--edge_path`)
+kNN edges with `from` / `to` or autodetected equivalents.
 
-Compare SSL+linear probe vs fully supervised GNN
+---
 
-Output:
+## Outputs
 
-GNN_exercise_score_sup
+Writes a TSV with:
+- MTI-GNN predictions  
+- ranks + scaled ranks  
+- multi-layer probabilities  
+- learned embeddings  
 
-GNN_exercise_rank_sup
+---
+
+## Summary
+
+**Deep learning meets multi-omic causal inference.**  
+This model uses MR + MTI as its primary evidence base and incorporates AlphaFold2, PANTHER and graph topology to achieve **structure-aware, biologically contextualised gene prioritisation**.
