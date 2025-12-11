@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -7,6 +8,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 from torch_geometric.data import Data
+
+# ---------------------------------------------------------
+# 0. Reproducibility
+# ---------------------------------------------------------
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
 
 # ---------------------------------------------------------
 # 1. Model definition
@@ -66,14 +78,28 @@ def build_edge_index(edge_df, gene_to_idx):
 # 3. Main
 # ---------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--node_path", required=True,
-                        help="Path to GNN node table (MR + sc-MR + struct + RE-PANTHER).")
-    parser.add_argument("--edge_path", required=True,
-                        help="Path to kNN edge table (k=15).")
-    parser.add_argument("--out_path", default=None,
-                        help="Output TSV for embeddings + ranks "
-                             "(default: same folder with *_GNN_MULTI.tsv).")
+    parser = argparse.ArgumentParser(
+        description="Supervised GAT MTI–MULTI model with updated AlphaFold v6 structure features and hybrid MTI+multi-omic ranking."
+    )
+    parser.add_argument(
+        "--node_path",
+        required=True,
+        help="Path to GNN node table (MR + sc-MR + struct + RE-PANTHER + AFv6 features).",
+    )
+    parser.add_argument(
+        "--edge_path",
+        required=True,
+        help="Path to kNN edge table (k=15).",
+    )
+    parser.add_argument(
+        "--out_path",
+        default=None,
+        help=(
+            "Output TSV for embeddings + ranks. "
+            "Default: GNN_embeddings_EXERCISEONLY_GAT_SUP_MTI_MULTI_MR_SC_STRUCT_PANTHER_AFv6.tsv "
+            "in the LDaware_MR_proteins folder."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lambda_multi", type=float, default=0.3)
@@ -99,9 +125,20 @@ def main():
     drop_targets = [c for c in ["MTI_score", "MTI_sumsq", "MTI_n_layers"] if c in numeric_cols]
     feature_cols = [c for c in numeric_cols if c not in drop_targets]
 
+    # --- IMPORTANT: drop old AFv2/v4 structural features ---
+    old_af_cols = [c for c in feature_cols if c.startswith("pLDDT")] + [
+        c for c in feature_cols if c == "n_atoms"
+    ]
+    feature_cols = [c for c in feature_cols if c not in old_af_cols]
+
+    # Debug: show AFv6-related columns actually included
+    afv6_cols = [c for c in feature_cols if c.startswith("af_")]
+
     print("\nUsing feature columns for GNN (first 15):")
     print("   ", feature_cols[:15], "...")
     print("Total feature dims:", len(feature_cols))
+    print("\nDropped old AlphaFold v2/v4 columns:", old_af_cols if old_af_cols else "None")
+    print("AlphaFold v6 structure features included:", afv6_cols if afv6_cols else "None detected")
 
     X = node_df[feature_cols].to_numpy(dtype=np.float32)
 
@@ -157,14 +194,13 @@ def main():
 
     # Detect columns
     if not {"from", "to"}.issubset(edge_df.columns):
-        # Try to infer
         candidates_from = [c for c in edge_df.columns if c.lower() in ("from", "source", "gene1")]
-        candidates_to   = [c for c in edge_df.columns if c.lower() in ("to", "target", "gene2")]
+        candidates_to = [c for c in edge_df.columns if c.lower() in ("to", "target", "gene2")]
         if not candidates_from or not candidates_to:
             raise ValueError("Could not detect 'from'/'to' columns in edge file.")
         edge_df = edge_df.rename(columns={
             candidates_from[0]: "from",
-            candidates_to[0]:   "to"
+            candidates_to[0]: "to"
         })
 
     print("Edge rows:", len(edge_df))
@@ -178,14 +214,18 @@ def main():
         f"dst [{edge_index[1].min().item()}..{edge_index[1].max().item()}]"
     )
 
-    data = Data(x=x, edge_index=edge_index)
-    data = data.to(device)
+    data = Data(x=x, edge_index=edge_index).to(device)
 
     # -----------------------------------------
     # 3.3 Model + training
     # -----------------------------------------
-    model = MTIMultiNet(in_dim=len(feature_cols), hidden_dim=64, out_dim=64,
-                        heads=4, dropout=0.2).to(device)
+    model = MTIMultiNet(
+        in_dim=len(feature_cols),
+        hidden_dim=64,
+        out_dim=64,
+        heads=4,
+        dropout=0.2,
+    ).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     print("\nStarting training…\n")
@@ -226,7 +266,7 @@ def main():
     print("\n✅ Training complete.\n")
 
     # -----------------------------------------
-    # 3.4 Save embeddings + ranks
+    # 3.4 Save embeddings + ranks (MTI-only + hybrid MTI+multi-omic)
     # -----------------------------------------
     model.eval()
     with torch.no_grad():
@@ -235,27 +275,57 @@ def main():
 
     mti_pred_np = mti_pred.cpu().numpy()
     multi_prob_np = multi_prob.cpu().numpy()
+    n = len(mti_pred_np)
 
-    # Ranks: higher MTI_pred = better (rank 1)
-    order = np.argsort(-mti_pred_np)
-    ranks = np.empty_like(order)
-    ranks[order] = np.arange(1, len(order) + 1)
+    # --- A) MTI-only ranking (for reference) ---
+    order_mti = np.argsort(-mti_pred_np)
+    ranks_mti = np.empty_like(order_mti)
+    ranks_mti[order_mti] = np.arange(1, n + 1)
+    rank_mti_scaled = (n - ranks_mti) / (n - 1.0)
 
-    rank_scaled = (len(ranks) - ranks) / (len(ranks) - 1.0)
+    # --- B) Hybrid ranking: MTI + multi-omic support ---
+    # z-score both MTI_pred and multi_prob, then hybrid_score = z(MTI_pred) + z(multi_prob)
+    mti_mean = mti_pred_np.mean()
+    mti_std = mti_pred_np.std()
+    if mti_std == 0:
+        z_mti = mti_pred_np - mti_mean
+    else:
+        z_mti = (mti_pred_np - mti_mean) / mti_std
+
+    mp_mean = multi_prob_np.mean()
+    mp_std = multi_prob_np.std()
+    if mp_std == 0:
+        z_mp = multi_prob_np - mp_mean
+    else:
+        z_mp = (multi_prob_np - mp_mean) / mp_std
+
+    alpha = 1.0  # weight for multi-omic support; can tune if needed
+    hybrid_score = z_mti + alpha * z_mp
+
+    order_h = np.argsort(-hybrid_score)
+    ranks_h = np.empty_like(order_h)
+    ranks_h[order_h] = np.arange(1, n + 1)
+    rank_h_scaled = (n - ranks_h) / (n - 1.0)
 
     out_df = node_df[["gene_symbol"]].copy()
     out_df["MTI_score"] = mti
     out_df["GNN_EXERCISE_SUP_MTI_MULTI_pred"] = mti_pred_np
-    out_df["GNN_EXERCISE_SUP_MTI_MULTI_rank"] = ranks.astype(int)
-    out_df["GNN_EXERCISE_SUP_MTI_MULTI_rank_scaled"] = rank_scaled
     out_df["GNN_EXERCISE_SUP_MTI_MULTI_multi_prob"] = multi_prob_np
 
-    # Decide output path
+    # MTI-only rank (reference)
+    out_df["GNN_EXERCISE_SUP_MTI_MULTI_rank_MTIonly"] = ranks_mti.astype(int)
+    out_df["GNN_EXERCISE_SUP_MTI_MULTI_rank_MTIonly_scaled"] = rank_mti_scaled
+
+    # Hybrid MTI + multi-omic rank (MAIN)
+    out_df["GNN_EXERCISE_SUP_MTI_MULTI_hybrid_score"] = hybrid_score
+    out_df["GNN_EXERCISE_SUP_MTI_MULTI_rank"] = ranks_h.astype(int)
+    out_df["GNN_EXERCISE_SUP_MTI_MULTI_rank_scaled"] = rank_h_scaled
+
+    # Default output path
     if args.out_path is None:
-        base = args.node_path.rsplit("/", 1)[-1].replace(".tsv", "")
         out_path = (
             "/Users/ciara/Downloads/LDaware_MR_proteins/"
-            f"GNN_embeddings_EXERCISEONLY_GAT_SUP_MTI_MULTI_MR_SC_STRUCT_PANTHER.tsv"
+            "GNN_embeddings_EXERCISEONLY_GAT_SUP_MTI_MULTI_MR_SC_STRUCT_PANTHER_AFv6.tsv"
         )
     else:
         out_path = args.out_path
@@ -272,9 +342,10 @@ def main():
                 "gene_symbol",
                 "MTI_score",
                 "GNN_EXERCISE_SUP_MTI_MULTI_pred",
+                "GNN_EXERCISE_SUP_MTI_MULTI_multi_prob",
+                "GNN_EXERCISE_SUP_MTI_MULTI_rank_MTIonly",
                 "GNN_EXERCISE_SUP_MTI_MULTI_rank",
                 "GNN_EXERCISE_SUP_MTI_MULTI_rank_scaled",
-                "GNN_EXERCISE_SUP_MTI_MULTI_multi_prob",
             ]
         ]
     )
@@ -282,5 +353,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
