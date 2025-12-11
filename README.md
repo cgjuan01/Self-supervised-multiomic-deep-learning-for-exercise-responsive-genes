@@ -31,7 +31,7 @@ Thus, **MR + MTI are the fundamental quantitative basis for all model prediction
 
 ## Feature groups
 
-### **AlphaFold2 structure features**
+### **AlphaFold v6 structure features**
 - pLDDT distributions  
 - secondary structure fractions  
 - disorder/exposure metrics  
