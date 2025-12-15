@@ -107,7 +107,7 @@ This GAT integrates:
 1) MR causal evidence
 2) Multi-omic MTI supervision
 3) AlphaFold v6 structural properties
-4) PANTHER-derived functional categories
+4) Uniprot, Interpro, PANTHER-derived functional categories
 5) Graph topology context
 
 to deliver a structure-aware, evidence-integrated prioritisation of exercise-responsive genes.
